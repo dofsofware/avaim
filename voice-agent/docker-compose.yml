@@ -11,7 +11,11 @@ services:
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       PIPER_VOICE: ${PIPER_VOICE:-fr_FR-siwis-medium}
-      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      # STT_PROVIDER=gemini (en ligne, precis et rapide) ou whisper (local, hors ligne).
+      STT_PROVIDER: ${STT_PROVIDER:-gemini}
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      # Mettre à 1 le temps d'un appel pour vider l'audio entrant brut dans /app/dump.
+      DEBUG_DUMP_AUDIO: ${DEBUG_DUMP_AUDIO:-}
       PIPECAT_WS_HOST: 0.0.0.0
       PIPECAT_WS_PORT: 8765
     extra_hosts:

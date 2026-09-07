@@ -13,6 +13,7 @@ au niveau plateforme, hors périmètre de ce POC à un seul agent.
 """
 
 import asyncio
+import audioop
 import os
 
 from loguru import logger
@@ -30,6 +31,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.services.anthropic.llm import AnthropicLLMService
+from pipecat.services.google.gemini_live.stt import GeminiSTTService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.piper.tts import PiperTTSService, PiperTTSSettings
 from pipecat.services.whisper.stt import WhisperSTTService
@@ -46,6 +48,14 @@ from vault_client import fetch_llm_api_key
 WS_HOST = os.environ.get("PIPECAT_WS_HOST", "0.0.0.0")
 WS_PORT = int(os.environ.get("PIPECAT_WS_PORT", "8765"))
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
+# STT_PROVIDER=gemini|whisper. Le cahier des charges (§ STT/TTS Gateways) impose un STT
+# interchangeable ; ce POC en implémente deux. "whisper" reste utile hors ligne, mais sur ce
+# matériel (i7-8665U, pas de GPU) il plafonne : le modèle "small" confond "vos horaires
+# d'ouverture" avec "vos oreilles de travail", et "medium", qui transcrit juste, coûte ~14 s par
+# tour de parole — Whisper traitant toujours des fenêtres de 30 s, ce coût est quasi indépendant
+# de la longueur de l'énoncé. Gemini transcrit le même extrait parfaitement en ~1,5 s, avec la
+# clé déjà présente dans Vault.
+STT_PROVIDER = os.environ.get("STT_PROVIDER", "gemini")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
 # flash-lite plutôt que flash : mesuré à 0,83 s contre 2,32 s pour une réponse courte, ce qui
 # compte directement dans la latence perçue au téléphone. Le quota gratuit est par modèle ET par
@@ -54,7 +64,67 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"
 # facturation Google ou un crédit Anthropic avant toute démonstration.
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 PIPER_VOICE = os.environ.get("PIPER_VOICE", "fr_FR-siwis-medium")
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
+# Débit imposé par Whisper, indépendant de celui du pipeline (8 kHz, cf. SAMPLE_RATE).
+WHISPER_SAMPLE_RATE = 16000
+
+
+class TelephonyWhisperSTTService(WhisperSTTService):
+    """WhisperSTTService corrigé pour de l'audio téléphonique 8 kHz.
+
+    BUG RÉEL trouvé dans cette session, et de loin le plus coûteux : faster-whisper attend
+    TOUJOURS du 16 kHz, mais pipecat-ai 1.8.1 ne rééchantillonne nulle part. `SegmentedSTTService`
+    transmet son tampon brut au débit du pipeline (`stt_service.py:890`) et `WhisperSTTService`
+    le convertit simplement en float32 avant de le passer au modèle (`whisper/stt.py:413-419`).
+    Sur une chaîne téléphonique à 8 kHz, Whisper entendait donc la voix deux fois trop lente et
+    une octave trop bas. Mesuré sur un vrai enregistrement d'appel, à modèle identique :
+        sans rééchantillonnage : "Bon, je vous traite à la tête pour vous" — 30,3 s
+        avec rééchantillonnage  : "Bonjour, je voudrais savoir..."        —  5,5 s
+    Soit la précision ET la vitesse (5,5x) d'un seul coup. La lenteur avait d'abord été imputée
+    à tort à la taille du modèle, alors que Whisper traitait chaque énoncé comme s'il durait le
+    double.
+
+    beam_size=1 : pipecat n'expose aucune option de décodage — il appelle
+    `model.transcribe(audio, language=...)` sans transmettre le champ `Settings.extra` pourtant
+    déclaré. On les lie donc au modèle lui-même. La recherche gloutonne s'est révélée plus rapide
+    que le beam_size=5 par défaut, à qualité équivalente sur nos enregistrements.
+
+    Une amorce (`initial_prompt`) a été essayée puis ÉCARTÉE : elle ne corrigeait la transcription
+    que lorsqu'elle contenait déjà les mots attendus. Avec une amorce neutre, le résultat était
+    identique à l'absence d'amorce — le gain apparent venait de la fuite de la réponse dans le
+    test, pas d'un vrai conditionnement.
+    """
+
+    def _load(self):
+        super()._load()
+        transcribe = self._model.transcribe
+        self._model.transcribe = lambda audio, **kw: transcribe(
+            audio, beam_size=1, condition_on_previous_text=False, **kw
+        )
+
+    async def run_stt(self, audio: bytes):
+        if self.sample_rate != WHISPER_SAMPLE_RATE:
+            audio, _ = audioop.ratecv(audio, 2, 1, self.sample_rate, WHISPER_SAMPLE_RATE, None)
+        async for frame in super().run_stt(audio):
+            yield frame
+
+
+async def build_stt():
+    if STT_PROVIDER == "gemini":
+        # Le débit du pipeline (8 kHz) est transmis tel quel dans le mime-type de chaque bloc
+        # audio ; vérifié qu'un extrait d'appel réel en 8 kHz est transcrit aussi bien qu'une
+        # version rééchantillonnée à 16 kHz, donc rien à convertir ici.
+        return GeminiSTTService(
+            api_key=await fetch_llm_api_key("gemini"),
+            settings=GeminiSTTService.Settings(language=Language.FR),
+        )
+    if STT_PROVIDER == "whisper":
+        return TelephonyWhisperSTTService(
+            device="cpu",
+            compute_type="int8",
+            settings=WhisperSTTService.Settings(model=WHISPER_MODEL, language=Language.FR),
+        )
+    raise ValueError(f"STT_PROVIDER inconnu : {STT_PROVIDER!r} (attendu: gemini, whisper)")
 
 
 def build_llm(api_key: str):
@@ -112,11 +182,7 @@ async def main() -> None:
     # Settings (vérifié par introspection sur pipecat-ai 1.8.1). Sans compute_type explicite,
     # ctranslate2 convertit les poids float16 du modèle en float32 sur CPU — deux fois plus
     # lent que int8 pour une transcription identique sur notre phrase de test.
-    stt = WhisperSTTService(
-        device="cpu",
-        compute_type="int8",
-        settings=WhisperSTTService.Settings(model=WHISPER_MODEL, language=Language.FR),
-    )
+    stt = await build_stt()
 
     llm = build_llm(llm_api_key)
 

@@ -23,6 +23,8 @@ JSON de contrôle sur le même canal (ex. un message de démarrage), la branche
 import audioop
 import base64
 import json
+import os
+import time
 
 from loguru import logger
 
@@ -54,6 +56,15 @@ class FreeswitchAudioStreamSerializer(FrameSerializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._chunk_count = 0
+        # Vidage brut de l'audio entrant, pour diagnostiquer la qualité réellement soumise au
+        # STT (niveau, écrêtage, intelligibilité) plutôt que de la déduire des transcriptions.
+        # Désactivé par défaut : n'activer que le temps d'un appel de test.
+        self._dump = None
+        if os.environ.get("DEBUG_DUMP_AUDIO"):
+            path = f"/app/dump/in_{time.strftime('%H%M%S')}.raw"
+            os.makedirs("/app/dump", exist_ok=True)
+            self._dump = open(path, "wb")
+            logger.info(f"[freeswitch_audio_stream] vidage audio entrant vers {path}")
 
     async def setup(self, setup) -> None:
         return None
@@ -75,6 +86,9 @@ class FreeswitchAudioStreamSerializer(FrameSerializer):
     async def deserialize(self, data) -> Frame | None:
         if isinstance(data, (bytes, bytearray)):
             self._chunk_count += 1
+            if self._dump is not None:
+                self._dump.write(bytes(data))
+                self._dump.flush()
             if self._chunk_count % 50 == 0:
                 try:
                     peak = audioop.max(bytes(data), 2)
