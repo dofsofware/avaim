@@ -18,6 +18,8 @@ import os
 
 from loguru import logger
 
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import LLMRunFrame
@@ -37,6 +39,10 @@ from pipecat.services.google.tts import GeminiTTSService
 from pipecat.services.piper.tts import PiperTTSService, PiperTTSSettings
 from pipecat.services.whisper.stt import WhisperSTTService
 from pipecat.transcriptions.language import Language
+from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
+    TurnAnalyzerUserTurnStopStrategy,
+)
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.transports.websocket.server import (
     SingleClientWebsocketServerParams,
     SingleClientWebsocketServerTransport,
@@ -225,9 +231,31 @@ async def main() -> None:
     tts = await build_tts()
 
     context = LLMContext()
+    # Réglage de la latence de prise de parole. Mesuré sur un vrai tour de conversation, les
+    # deux tiers de l'attente ne venaient ni du STT, ni du LLM, ni du TTS (2,2 s à eux trois)
+    # mais de la détection de fin de tour : 7,6 s entre la fin de la phrase de l'appelant et le
+    # début de la réponse, dont 5,1 s passées dans l'agrégateur.
+    #
+    # Deux temporisations s'additionnaient :
+    #  - SmartTurnParams.stop_secs (3 s par défaut) : silence exigé par l'analyseur sémantique
+    #    de fin de tour quand il juge l'énoncé encore incomplet ;
+    #  - LLMUserAggregatorParams.user_turn_stop_timeout (5 s par défaut) : délai de garde quand
+    #    aucune stratégie n'a tranché — c'est lui qui décidait en pratique, le journal montrant
+    #    "User stopped speaking (strategy: None)" exactement 5,14 s après la fin de parole.
+    #
+    # Compromis à surveiller : trop court, l'agent coupe la parole à qui marque une pause pour
+    # réfléchir. L'analyseur sémantique reste en place et tranche avant ces délais dès qu'il
+    # reconnaît une phrase terminée ; ces valeurs ne sont que des filets de sécurité.
+    turn_analyzer = LocalSmartTurnAnalyzerV3(params=SmartTurnParams(stop_secs=1.0))
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer(params=vad_params)),
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(params=vad_params),
+            user_turn_stop_timeout=2.0,
+            user_turn_strategies=UserTurnStrategies(
+                stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=turn_analyzer)]
+            ),
+        ),
     )
 
     pipeline = Pipeline(
