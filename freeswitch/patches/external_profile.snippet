@@ -1,0 +1,23 @@
+<!--
+  À fusionner à la main dans /etc/freeswitch/sip_profiles/external.xml sur le PC (à l'intérieur
+  de la balise <settings> existante — NE PAS remplacer le fichier entier).
+
+  Objectif : faire écouter le profil "external" sur le port 8088 (celui redirigé par la box vers
+  ce PC), n'accepter le SIP entrant que depuis les IP Twilio (liste définie dans acl.conf.xml,
+  voir acl.conf.xml.snippet), et fixer l'audio RTP sur le seul port 2025 également redirigé
+  (suffisant pour un appel à la fois — le but de ce POC).
+-->
+<param name="sip-port" value="8088"/>
+<param name="apply-inbound-acl" value="twilio-signaling"/>
+<param name="ext-sip-ip" value="REMPLACER_PAR_IP_PUBLIQUE_BOX"/>
+<param name="ext-rtp-ip" value="REMPLACER_PAR_IP_PUBLIQUE_BOX"/>
+<param name="rtp-start-port" value="2025"/>
+<param name="rtp-end-port" value="2025"/>
+
+<!--
+  Après modification, recharger sans redémarrer tout le conteneur :
+    fs_cli -x "reloadacl"
+    fs_cli -x "sofia profile external restart"
+
+  Vérifier ensuite que "sofia status" montre bien le profil external sur le port 8088.
+-->

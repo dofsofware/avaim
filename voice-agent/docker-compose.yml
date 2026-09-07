@@ -1,0 +1,21 @@
+services:
+  voice-agent:
+    build: .
+    container_name: voice-agent
+    environment:
+      # Vault tourne directement sur le PC hôte (hors Docker) à http://localhost:8300 —
+      # depuis un conteneur, on l'atteint via host.docker.internal.
+      VAULT_ADDR: http://host.docker.internal:8300
+      VAULT_TOKEN: ${VAULT_TOKEN}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      PIPER_VOICE: ${PIPER_VOICE:-fr_FR-siwis-medium}
+      PIPECAT_WS_HOST: 0.0.0.0
+      PIPECAT_WS_PORT: 8765
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      # Doit rester joignable uniquement via l'interface WireGuard (10.10.0.2), pas
+      # exposé publiquement — voir RUNBOOK.md pour le rappel sécurité.
+      - "8765:8765"

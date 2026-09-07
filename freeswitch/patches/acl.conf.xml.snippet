@@ -1,0 +1,14 @@
+<!--
+  À fusionner à la main dans /etc/freeswitch/autoload_configs/acl.conf.xml sur le PC
+  (à l'intérieur de la balise <network-lists> existante — NE PAS remplacer le fichier entier,
+  seulement y ajouter cette <list>).
+
+  Récupérer les plages IP SIP signalisation à jour de Twilio ici avant de remplir :
+  https://www.twilio.com/docs/sip-trunking/ip-addresses
+  (Twilio publie des plages par région — n'y mettre que celles pertinentes, ex. us1/ie1 selon
+  la région choisie pour le trunk).
+-->
+<list name="twilio-signaling" default="deny">
+  <!-- <node type="allow" cidr="REMPLACER_PAR_PLAGE_TWILIO_1/32"/> -->
+  <!-- <node type="allow" cidr="REMPLACER_PAR_PLAGE_TWILIO_2/32"/> -->
+</list>

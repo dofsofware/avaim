@@ -1,0 +1,6 @@
+# À valider/ajuster au premier `pip install` réel (extras exacts non vérifiés dans cette
+# session, pas de Python disponible sur ce poste pour tester `pip install` ni `pip show`).
+pipecat-ai[anthropic,google,whisper,piper,websocket,silero]>=0.0.90
+aiohttp>=3.9
+loguru>=0.7
+python-dotenv>=1.0

@@ -1,0 +1,16 @@
+<!--
+  Extension additive dans le contexte "public" (celui utilisé par défaut pour les appels
+  entrants non authentifiés depuis un trunk externe comme Twilio).
+
+  IMPORTANT : remplacer TWILIO_NUMBER_E164 ci-dessous par le numéro Twilio réellement acheté
+  (au format tel qu'il arrive dans le champ Request-URI/To de l'INVITE Twilio — généralement
+  en E.164 sans le "+", ex: 15551234567). À vérifier avec `fs_cli -x "sofia status"` et les
+  logs du premier appel de test si le matching échoue.
+-->
+<include>
+  <extension name="twilio_inbound_to_agent">
+    <condition field="destination_number" expression="^(TWILIO_NUMBER_E164)$">
+      <action application="lua" data="stream_to_pipecat.lua"/>
+    </condition>
+  </extension>
+</include>

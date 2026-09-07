@@ -1,0 +1,176 @@
+"""Point d'entrée du service Pipecat du POC.
+
+Assemble : Transport websocket (côté FreeSWITCH) -> Whisper (STT, local) -> LLM (BYOK, clé
+récupérée depuis Vault, cf. §13.2/§14 du cahier des charges) -> Piper (TTS, local) -> Transport.
+
+Écrit puis VALIDÉ par introspection contre pipecat-ai==1.8.1 réellement installé (build Docker
++ inspection des signatures dans cette session, voir historique de la conversation).
+
+Provider LLM sélectionnable via LLM_PROVIDER=anthropic|gemini (défaut : gemini, le temps que
+le compte Anthropic ait des crédits — voir RUNBOOK.md). C'est un simple aiguillage, pas une
+vraie "AI Gateway" (cf. cahier des charges §15) : cette abstraction complète reste à construire
+au niveau plateforme, hors périmètre de ce POC à un seul agent.
+"""
+
+import asyncio
+import os
+
+from loguru import logger
+
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.frames.frames import LLMRunFrame
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.runner import PipelineRunner
+from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
+from pipecat.processors.audio.vad_processor import VADProcessor
+from pipecat.services.anthropic.llm import AnthropicLLMService
+from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.piper.tts import PiperTTSService, PiperTTSSettings
+from pipecat.services.whisper.stt import WhisperSTTService
+from pipecat.transcriptions.language import Language
+from pipecat.transports.websocket.server import (
+    SingleClientWebsocketServerParams,
+    SingleClientWebsocketServerTransport,
+)
+
+from prompt import SYSTEM_PROMPT
+from transports.freeswitch_audio_stream import SAMPLE_RATE, FreeswitchAudioStreamSerializer
+from vault_client import fetch_llm_api_key
+
+WS_HOST = os.environ.get("PIPECAT_WS_HOST", "0.0.0.0")
+WS_PORT = int(os.environ.get("PIPECAT_WS_PORT", "8765"))
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+PIPER_VOICE = os.environ.get("PIPER_VOICE", "fr_FR-siwis-medium")
+
+
+def build_llm(api_key: str):
+    if LLM_PROVIDER == "anthropic":
+        return AnthropicLLMService(
+            api_key=api_key,
+            settings=AnthropicLLMService.Settings(
+                model=ANTHROPIC_MODEL,
+                max_tokens=1024,
+                system_instruction=SYSTEM_PROMPT,
+            ),
+        )
+    if LLM_PROVIDER == "gemini":
+        return GoogleLLMService(
+            api_key=api_key,
+            settings=GoogleLLMService.Settings(
+                model=GEMINI_MODEL,
+                max_tokens=1024,
+                system_instruction=SYSTEM_PROMPT,
+            ),
+        )
+    raise ValueError(f"LLM_PROVIDER inconnu : {LLM_PROVIDER!r} (attendu: anthropic, gemini)")
+
+
+async def main() -> None:
+    llm_api_key = await fetch_llm_api_key(LLM_PROVIDER)
+
+    transport = SingleClientWebsocketServerTransport(
+        host=WS_HOST,
+        port=WS_PORT,
+        params=SingleClientWebsocketServerParams(
+            serializer=FreeswitchAudioStreamSerializer(),
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            audio_in_sample_rate=SAMPLE_RATE,
+            audio_out_sample_rate=SAMPLE_RATE,
+        ),
+    )
+
+    # pipecat-ai 1.8.1 : la VAD n'est plus un paramètre du transport (constaté par
+    # introspection — TransportParams n'a plus de champ vad_analyzer). Il faut l'insérer
+    # explicitement comme étage du pipeline, AVANT le STT, sinon WhisperSTTService ne reçoit
+    # jamais de VADUserStartedSpeakingFrame/VADUserStoppedSpeakingFrame et ne transcrit rien
+    # (bug réel trouvé et corrigé pendant cette session : l'audio arrivait bien jusqu'au STT,
+    # mais restait bufferisé indéfiniment faute de signal de fin de tour).
+    #
+    # min_volume=0.6 (défaut pipecat) s'est révélé trop strict : mesuré empiriquement sur notre
+    # audio de test (confiance Silero jusqu'à 0.99, mais volume lissé plafonnant à ~0.19), donc
+    # abaissé à 0.1 — la confiance reste le signal principal. À réévaluer avec de l'audio
+    # téléphonique réel une fois FreeSWITCH branché (peut nécessiter un ajustement différent).
+    vad_params = VADParams(min_volume=0.1)
+    vad = VADProcessor(vad_analyzer=SileroVADAnalyzer(params=vad_params))
+
+    stt = WhisperSTTService(settings=WhisperSTTService.Settings(model="small", language=Language.FR))
+
+    llm = build_llm(llm_api_key)
+
+    tts = PiperTTSService(settings=PiperTTSSettings(voice=PIPER_VOICE, language="fr"))
+
+    context = LLMContext()
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer(params=vad_params)),
+    )
+
+    pipeline = Pipeline(
+        [
+            transport.input(),
+            vad,
+            stt,
+            user_aggregator,
+            llm,
+            tts,
+            transport.output(),
+            assistant_aggregator,
+        ]
+    )
+
+    # PipelineParams.audio_in_sample_rate vaut 16000 par défaut, indépendamment de
+    # audio_in_sample_rate=8000 réglé sur le transport — bug réel trouvé pendant cette
+    # session : la VAD utilisait silencieusement 16000 Hz sur de l'audio réellement à 8000 Hz
+    # (aucune erreur, 16000 étant un taux supporté par Silero, juste un mauvais découpage des
+    # échantillons), ce qui empêchait toute détection de parole. Doit rester aligné sur
+    # SAMPLE_RATE partout dans ce fichier.
+    # idle_timeout_secs=None : `PipelineTask` (alias de `pipecat.pipeline.worker.PipelineWorker`)
+    # annule tout le pipeline après 5 minutes d'inactivité par défaut (IDLE_TIMEOUT_SECS=300) —
+    # bug réel trouvé pendant cette session : le conteneur s'arrêtait tout seul en attendant un
+    # appel, avant même qu'un client ne se connecte. Notre service DOIT pouvoir attendre
+    # indéfiniment entre deux appels, donc ce minuteur est désactivé.
+    task = PipelineTask(
+        pipeline,
+        params=PipelineParams(
+            allow_interruptions=True,
+            audio_in_sample_rate=SAMPLE_RATE,
+            audio_out_sample_rate=SAMPLE_RATE,
+        ),
+        idle_timeout_secs=None,
+    )
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(_transport, _client):
+        # Le message d'accueil est déclenché ici, mais son contenu vient du system_instruction
+        # (voir prompt.py) : Claude se présente de lui-même dès ce premier LLMRunFrame, sans
+        # message utilisateur préalable.
+        logger.info("FreeSWITCH connecté — appel en cours, déclenchement du message d'accueil.")
+        await task.queue_frames([LLMRunFrame()])
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(_transport, _client):
+        # Bug réel trouvé pendant cette session : appeler task.cancel() ici annule tout le
+        # pipeline, ce qui termine runner.run(task) et donc le process — le conteneur
+        # s'arrêtait après CHAQUE appel. Or SingleClientWebsocketServerTransport est conçu pour
+        # accepter des appels successifs (confirmé en lisant _client_handler du transport
+        # installé : il boucle indéfiniment, acceptant un nouveau client après chaque
+        # déconnexion). Il suffit donc de réinitialiser la conversation pour le prochain appel,
+        # sans toucher au pipeline lui-même.
+        logger.info("FreeSWITCH déconnecté — fin d'appel, réinitialisation pour le prochain.")
+        context.set_messages([])
+
+    runner = PipelineRunner()
+    await runner.run(task)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

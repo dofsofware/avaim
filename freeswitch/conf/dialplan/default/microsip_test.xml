@@ -1,0 +1,19 @@
+<!--
+  Extension de test pour appeler l'agent IA directement en SIP local (MicroSIP ou tout autre
+  softphone enregistré sur le profil "internal"), sans passer par Twilio/Orange. Composer
+  l'extension 9999 depuis le softphone pour déclencher la même conversation IA que via un
+  vrai appel téléphonique.
+
+  IMPORTANT : les appels provenant d'un utilisateur enregistré (ex. MicroSIP) sont routés par
+  FreeSWITCH via le contexte "default" (pas "public", qui ne sert qu'aux appels entrants non
+  authentifiés comme ceux de Twilio) — constaté empiriquement lors du premier test réel dans
+  cette session (l'appel tombait sinon dans l'extension générique "enum" du contexte default,
+  qui tente une résolution DNS du numéro et échoue en "480 Temporarily Unavailable").
+-->
+<include>
+  <extension name="microsip_test_to_agent">
+    <condition field="destination_number" expression="^9999$">
+      <action application="lua" data="stream_to_pipecat.lua"/>
+    </condition>
+  </extension>
+</include>
