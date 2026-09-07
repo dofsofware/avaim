@@ -100,7 +100,7 @@ RUN git clone --recurse-submodules https://github.com/amigniter/mod_audio_stream
 RUN sed -i 's#</modules>#  <load module="mod_audio_stream"/>\n</modules>#' \
     /etc/freeswitch/autoload_configs/modules.conf.xml
 
-# Deux bugs réels trouvés au premier test réel avec un vrai softphone (MicroSIP, puis confirmé
+# Quatre bugs réels trouvés aux premiers tests avec un vrai softphone (MicroSIP, puis confirmé
 # avec Linphone sur iPhone sur un vrai réseau Wi-Fi — donc pas un problème spécifique à un
 # client) : la voix de l'appelant n'atteignait jamais FreeSWITCH (même l'extension d'écho
 # native 9196, sans aucun de notre code, ne renvoyait rien) ; FreeSWITCH raccrochait tout seul
@@ -137,6 +137,32 @@ RUN grep -n 'external_rtp_ip\|external_sip_ip' /etc/freeswitch/sip_profiles/inte
       /etc/freeswitch/autoload_configs/switch.conf.xml \
     && grep -n 'ext-rtp-ip\|ext-sip-ip' /etc/freeswitch/sip_profiles/internal.xml
 
+# 3. ext-rtp-ip ci-dessus ne suffisait PAS : FreeSWITCH ne l'applique que s'il juge l'appelant
+#    "derrière un NAT", et switch_core_media_check_nat() répond non dès que l'IP de l'appelant
+#    tombe dans local-network-acl (localnet.auto = les réseaux RFC1918 auxquels la machine est
+#    rattachée). Or les appels arrivent ici depuis 172.18.0.1, la passerelle du réseau Docker,
+#    qui est justement dans le sous-réseau du conteneur — donc classée "locale", donc pas de NAT,
+#    donc SDP annonçant l'IP interne 172.18.0.2. Vérifié dans les logs : la ligne "c=" du SDP
+#    restait à 172.18.0.2 malgré ext-rtp-ip correctement chargé (visible dans `sofia status`) et
+#    malgré aggressive-nat-detection=true, qui n'agit pas sur ce test-là. Avec "none", aucun
+#    appelant n'est considéré local, ext-rtp-ip s'applique, et le SDP annonce l'IP LAN joignable.
+#    C'est la correction qui a fait remonter la voix de l'appelant pour la première fois.
+RUN grep -q '<param name="local-network-acl" value="localnet.auto"/>' /etc/freeswitch/sip_profiles/internal.xml \
+    && sed -i 's#<param name="local-network-acl" value="localnet.auto"/>#<param name="local-network-acl" value="none"/>#' \
+      /etc/freeswitch/sip_profiles/internal.xml
+
+# 4. Le port SIP interne doit être IDENTIQUE dans le conteneur et sur l'hôte. FreeSWITCH publie
+#    son port d'écoute réel dans l'en-tête Contact du 200 OK, et le softphone y envoie son ACK.
+#    Avec une redirection Docker asymétrique (hôte 5061 -> conteneur 5060), le Contact annonçait
+#    5060 alors que rien n'écoutait sur ce port côté hôte : l'ACK n'arrivait jamais et FreeSWITCH
+#    raccrochait de lui-même au bout de 32 s (timer SIP 64xT1) avec
+#    `Reason: SIP;cause=408;text="ACK Timeout"` — l'audio fonctionnait pourtant, le RTP étant
+#    déjà négocié, ce qui rendait le symptôme très trompeur. 5060 est déjà occupé sur l'hôte par
+#    le softphone lui-même, d'où 5061 des deux côtés. Le paramètre ext-sip-port existe et
+#    corrigerait l'annonce, mais il déplace aussi le port d'écoute réel : autant l'aligner ici.
+RUN sed -i 's#internal_sip_port=5060#internal_sip_port=5061#' /etc/freeswitch/vars.xml \
+    && grep -n 'internal_sip_port' /etc/freeswitch/vars.xml
+
 # On n'écrase PAS les fichiers par défaut de acl.conf.xml / sip_profiles/external.xml :
 # leur contenu exact dépend de la version compilée et les deviner ici risquerait de casser des
 # réglages par défaut. Le dialplan, en revanche, est une simple extension additive (un fichier
@@ -161,4 +187,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # Ports SIP + RTP publiés au run — voir freeswitch/README.md. Configuration locale POC :
 #   8088/tcp+udp : signalisation SIP (redirigé par la box vers ce PC)
 #   2025/udp     : un seul port RTP fixe, suffisant pour un appel à la fois
-EXPOSE 8088/tcp 8088/udp 2025/udp
+#   5061/tcp+udp : signalisation SIP des softphones locaux (profil "internal") — DOIT être
+#                  publié à l'identique (5061:5061), cf. le bug "ACK Timeout" ci-dessus
+#   16384-16394/udp : plage RTP, publiée à l'identique elle aussi
+EXPOSE 8088/tcp 8088/udp 2025/udp 5061/tcp 5061/udp 16384-16394/udp
