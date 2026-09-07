@@ -49,6 +49,18 @@ while session:ready() do
                 freeswitch.consoleLog("WARNING", "[stream_to_pipecat] évènement play sans champ 'file' : " .. tostring(body) .. "\n")
             end
         end
+    else
+        -- session:sleep() n'est PAS une simple attente : switch_ivr_sleep() lit activement les
+        -- trames du canal (switch_core_session_read_frame) tant que le média est prêt. Or c'est
+        -- précisément cette lecture qui déclenche le "media bug" posé par mod_audio_stream sur
+        -- le flux entrant — sans elle, l'audio de l'appelant n'est JAMAIS transmis à Pipecat.
+        -- BUG RÉEL trouvé dans cette session : une version précédente de ce script remplaçait
+        -- un sleep() par la seule attente d'évènement ci-dessus, croyant le sleep inutile. La
+        -- voix de l'appelant ne remontait alors que pendant que l'agent parlait (streamFile()
+        -- lit lui aussi des trames), et pas une seconde de plus — donc aucune réponse n'était
+        -- jamais transcrite. La boucle doit lire du média en permanence, pas seulement pendant
+        -- les lectures de fichier.
+        session:sleep(100)
     end
 end
 

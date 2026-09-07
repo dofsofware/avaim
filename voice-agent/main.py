@@ -49,6 +49,7 @@ LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 PIPER_VOICE = os.environ.get("PIPER_VOICE", "fr_FR-siwis-medium")
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 
 
 def build_llm(api_key: str):
@@ -102,7 +103,15 @@ async def main() -> None:
     vad_params = VADParams(min_volume=0.1)
     vad = VADProcessor(vad_analyzer=SileroVADAnalyzer(params=vad_params))
 
-    stt = WhisperSTTService(settings=WhisperSTTService.Settings(model="small", language=Language.FR))
+    # device/compute_type sont des paramètres directs du constructeur, pas des champs de
+    # Settings (vérifié par introspection sur pipecat-ai 1.8.1). Sans compute_type explicite,
+    # ctranslate2 convertit les poids float16 du modèle en float32 sur CPU — deux fois plus
+    # lent que int8 pour une transcription identique sur notre phrase de test.
+    stt = WhisperSTTService(
+        device="cpu",
+        compute_type="int8",
+        settings=WhisperSTTService.Settings(model=WHISPER_MODEL, language=Language.FR),
+    )
 
     llm = build_llm(llm_api_key)
 

@@ -11,6 +11,7 @@ services:
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       PIPER_VOICE: ${PIPER_VOICE:-fr_FR-siwis-medium}
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
       PIPECAT_WS_HOST: 0.0.0.0
       PIPECAT_WS_PORT: 8765
     extra_hosts:

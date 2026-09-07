@@ -100,6 +100,43 @@ RUN git clone --recurse-submodules https://github.com/amigniter/mod_audio_stream
 RUN sed -i 's#</modules>#  <load module="mod_audio_stream"/>\n</modules>#' \
     /etc/freeswitch/autoload_configs/modules.conf.xml
 
+# Deux bugs réels trouvés au premier test réel avec un vrai softphone (MicroSIP, puis confirmé
+# avec Linphone sur iPhone sur un vrai réseau Wi-Fi — donc pas un problème spécifique à un
+# client) : la voix de l'appelant n'atteignait jamais FreeSWITCH (même l'extension d'écho
+# native 9196, sans aucun de notre code, ne renvoyait rien) ; FreeSWITCH raccrochait tout seul
+# après ~30s (media timeout : aucun RTP reçu de l'appelant).
+# 1. Le profil "internal" (clients LAN/locaux) annonçait l'IP PUBLIQUE détectée par STUN pour
+#    ext-rtp-ip/ext-sip-ip — un appelant sur le même réseau local tente alors d'envoyer son
+#    audio vers cette IP publique, qui doit faire un aller-retour par la box (hairpin NAT),
+#    souvent non supporté par les box grand public. Simplement retirer ces params est ALLÉ TROP
+#    LOIN : FreeSWITCH retombe alors sur l'IP interne du réseau Docker (ex. 172.18.0.2), qui
+#    n'est routable ni depuis le PC hôte de façon fiable, ni depuis un autre appareil du LAN
+#    (un iPhone en Wi-Fi, par exemple) — encore pire. La bonne valeur pour un profil "internal"
+#    utilisé en test local est l'IP LAN réelle de la machine hôte (ex. 192.168.1.10),
+#    paramétrable via LAN_IP au cas où elle changerait. Le profil "external", lui, doit garder
+#    son IP publique pour Twilio — non concerné par ce patch.
+# 2. La plage de ports RTP globale n'était pas fixée (16384-32768 par défaut, en commentaire
+#    dans switch.conf.xml) alors que seuls 16384-16394 sont publiés par Docker vers la box —
+#    FreeSWITCH pouvait donc choisir un port RTP hors de la plage réellement joignable pour
+#    RECEVOIR l'audio de l'appelant (l'envoi, lui, fonctionnait, d'où l'accueil audible mais
+#    aucune réponse jamais captée). Plage restreinte pour correspondre exactement au publié.
+# Remplacement par numéro de ligne (plus fiable que matcher le motif "$${external_rtp_ip}" au
+# milieu d'un empilement d'échappements shell/sed/Docker ARG) — vérifié à ces lignes exactes
+# dans cette version de FreeSWITCH ; si un futur rebuild depuis un commit plus récent échoue
+# silencieusement ici, revérifier le numéro de ligne réel avec :
+# `grep -n 'ext-rtp-ip\|ext-sip-ip' sip_profiles/internal.xml` dans le conteneur.
+ARG LAN_IP=192.168.1.10
+RUN grep -n 'external_rtp_ip\|external_sip_ip' /etc/freeswitch/sip_profiles/internal.xml \
+    && sed -i \
+      -e "299s#.*#    <param name=\"ext-rtp-ip\" value=\"${LAN_IP}\"/>#" \
+      -e "300s#.*#    <param name=\"ext-sip-ip\" value=\"${LAN_IP}\"/>#" \
+      /etc/freeswitch/sip_profiles/internal.xml \
+    && sed -i \
+      -e 's#<!-- <param name="rtp-start-port" value="16384"/> -->#<param name="rtp-start-port" value="16384"/>#' \
+      -e 's#<!-- <param name="rtp-end-port" value="32768"/> -->#<param name="rtp-end-port" value="16394"/>#' \
+      /etc/freeswitch/autoload_configs/switch.conf.xml \
+    && grep -n 'ext-rtp-ip\|ext-sip-ip' /etc/freeswitch/sip_profiles/internal.xml
+
 # On n'écrase PAS les fichiers par défaut de acl.conf.xml / sip_profiles/external.xml :
 # leur contenu exact dépend de la version compilée et les deviner ici risquerait de casser des
 # réglages par défaut. Le dialplan, en revanche, est une simple extension additive (un fichier
