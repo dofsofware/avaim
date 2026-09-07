@@ -47,7 +47,12 @@ WS_HOST = os.environ.get("PIPECAT_WS_HOST", "0.0.0.0")
 WS_PORT = int(os.environ.get("PIPECAT_WS_PORT", "8765"))
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+# flash-lite plutôt que flash : mesuré à 0,83 s contre 2,32 s pour une réponse courte, ce qui
+# compte directement dans la latence perçue au téléphone. Le quota gratuit est par modèle ET par
+# jour (20 requêtes pour gemini-2.5-flash, épuisées par les tests de cette session) — changer de
+# modèle repart donc sur un quota neuf, mais ce n'est pas une solution durable : prévoir la
+# facturation Google ou un crédit Anthropic avant toute démonstration.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 PIPER_VOICE = os.environ.get("PIPER_VOICE", "fr_FR-siwis-medium")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 
