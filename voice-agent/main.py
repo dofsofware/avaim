@@ -33,6 +33,7 @@ from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.services.anthropic.llm import AnthropicLLMService
 from pipecat.services.google.gemini_live.stt import GeminiSTTService
 from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.google.tts import GeminiTTSService
 from pipecat.services.piper.tts import PiperTTSService, PiperTTSSettings
 from pipecat.services.whisper.stt import WhisperSTTService
 from pipecat.transcriptions.language import Language
@@ -56,6 +57,12 @@ LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
 # de la longueur de l'énoncé. Gemini transcrit le même extrait parfaitement en ~1,5 s, avec la
 # clé déjà présente dans Vault.
 STT_PROVIDER = os.environ.get("STT_PROVIDER", "gemini")
+# TTS_PROVIDER=gemini|piper. Piper est préférable en français (local, gratuit, latence minimale)
+# mais n'a AUCUNE voix wolof — vérifié sur les 176 voix de son catalogue, dont la seule langue
+# africaine est le swahili. C'était le seul maillon réellement bloquant pour le wolof, le STT et
+# le LLM le gérant déjà. "gemini" est donc le défaut tant que le POC doit démontrer le
+# multilingue ; repasser à "piper" rend le service insensible aux quotas, au prix du wolof.
+TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "gemini")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
 # flash-lite plutôt que flash : mesuré à 0,83 s contre 2,32 s pour une réponse courte, ce qui
 # compte directement dans la latence perçue au téléphone. Le quota gratuit est par modèle ET par
@@ -109,6 +116,26 @@ class TelephonyWhisperSTTService(WhisperSTTService):
             yield frame
 
 
+async def build_tts():
+    if TTS_PROVIDER == "gemini":
+        # sample_rate=24000 est OBLIGATOIRE : l'API Gemini renvoie toujours du 24 kHz, mais le
+        # service étiquette ses trames avec son propre `sample_rate`, lequel vaut sinon celui du
+        # pipeline (8 kHz). BUG RÉEL constaté à l'oral dans cette session — de l'audio 24 kHz
+        # annoncé comme du 8 kHz est rejoué trois fois trop lentement, d'où une voix « robotique
+        # et ralentie ». Le service émet bien un avertissement au démarrage ("Google TTS requires
+        # 24000Hz sample rate") mais ne corrige rien. Une fois le débit réel annoncé, c'est le
+        # transport de sortie qui rééchantillonne vers les 8 kHz de FreeSWITCH
+        # (base_output.py:604).
+        return GeminiTTSService(
+            api_key=await fetch_llm_api_key("gemini"),
+            sample_rate=GeminiTTSService.GOOGLE_SAMPLE_RATE,
+            params=GeminiTTSService.InputParams(language=Language.FR),
+        )
+    if TTS_PROVIDER == "piper":
+        return PiperTTSService(settings=PiperTTSSettings(voice=PIPER_VOICE, language="fr"))
+    raise ValueError(f"TTS_PROVIDER inconnu : {TTS_PROVIDER!r} (attendu: gemini, piper)")
+
+
 async def build_stt():
     if STT_PROVIDER == "gemini":
         # Le débit du pipeline (8 kHz) est transmis tel quel dans le mime-type de chaque bloc
@@ -116,7 +143,16 @@ async def build_stt():
         # version rééchantillonnée à 16 kHz, donc rien à convertir ici.
         return GeminiSTTService(
             api_key=await fetch_llm_api_key("gemini"),
-            settings=GeminiSTTService.Settings(language=Language.FR),
+            # `languages` sert d'indice (pas de contrainte) sur les langues attendues — cf. §11
+            # du cahier des charges. Le service refuse de combiner ces indices avec
+            # `language_auto` ("mutually exclusive", les indices l'emportent) : on s'en tient
+            # donc aux indices, qui conviennent mieux à un agent dont les langues sont déclarées.
+            # Validé sur un vrai appel : Gemini a transcrit "Ninga def? Man dégguma wolof tubab
+            # dé. Est-ce que meun nga ma comprendre ?" en identifiant le wolof, y compris
+            # l'alternance codique wolof/français au sein d'une même phrase (§12). Épinglé sur
+            # `language=Language.FR` seul, il forçait au contraire le wolof dans le moule
+            # français — constaté à l'usage, "élections Sénégal" pour une phrase en wolof.
+            settings=GeminiSTTService.Settings(languages=[Language.FR, Language.WO]),
         )
     if STT_PROVIDER == "whisper":
         return TelephonyWhisperSTTService(
@@ -186,7 +222,7 @@ async def main() -> None:
 
     llm = build_llm(llm_api_key)
 
-    tts = PiperTTSService(settings=PiperTTSSettings(voice=PIPER_VOICE, language="fr"))
+    tts = await build_tts()
 
     context = LLMContext()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(

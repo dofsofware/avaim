@@ -13,6 +13,8 @@ services:
       PIPER_VOICE: ${PIPER_VOICE:-fr_FR-siwis-medium}
       # STT_PROVIDER=gemini (en ligne, precis et rapide) ou whisper (local, hors ligne).
       STT_PROVIDER: ${STT_PROVIDER:-gemini}
+      # TTS_PROVIDER=gemini (multilingue, wolof compris) ou piper (local, francais, sans quota).
+      TTS_PROVIDER: ${TTS_PROVIDER:-gemini}
       WHISPER_MODEL: ${WHISPER_MODEL:-small}
       # Mettre à 1 le temps d'un appel pour vider l'audio entrant brut dans /app/dump.
       DEBUG_DUMP_AUDIO: ${DEBUG_DUMP_AUDIO:-}
