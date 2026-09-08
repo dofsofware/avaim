@@ -33,6 +33,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.services.anthropic.llm import AnthropicLLMService
+from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
 from pipecat.services.google.gemini_live.stt import GeminiSTTService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.google.tts import GeminiTTSService
@@ -54,6 +55,15 @@ from vault_client import fetch_llm_api_key
 
 WS_HOST = os.environ.get("PIPECAT_WS_HOST", "0.0.0.0")
 WS_PORT = int(os.environ.get("PIPECAT_WS_PORT", "8765"))
+# PIPELINE_MODE=cascade|realtime.
+#  - "cascade" : la chaîne du cahier des charges, STT -> LLM -> TTS, chaque étage
+#    interchangeable et chacun avec sa propre clé (BYOK par composant).
+#  - "realtime" : un seul modèle "speech-to-speech" reçoit l'audio et rend l'audio, sans passer
+#    par du texte. Beaucoup plus fluide — les trois allers-retours en série disparaissent, et la
+#    fin de tour est jugée à l'intonation plutôt qu'au silence — mais fusionne STT, LLM et TTS
+#    chez un seul fournisseur, ce qui contredit le principe de passerelles interchangeables.
+#    D'où un MODE et non un remplacement : à choisir par agent selon ce qui prime.
+PIPELINE_MODE = os.environ.get("PIPELINE_MODE", "cascade")
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
 # STT_PROVIDER=gemini|whisper. Le cahier des charges (§ STT/TTS Gateways) impose un STT
 # interchangeable ; ce POC en implémente deux. "whisper" reste utile hors ligne, mais sur ce
@@ -120,6 +130,77 @@ class TelephonyWhisperSTTService(WhisperSTTService):
             audio, _ = audioop.ratecv(audio, 2, 1, self.sample_rate, WHISPER_SAMPLE_RATE, None)
         async for frame in super().run_stt(audio):
             yield frame
+
+
+async def run_pipeline(transport, pipeline, context, realtime_service=None):
+    """Partie commune aux deux modes : minuteurs, accueil, fin d'appel, exécution.
+
+    `realtime_service` n'est fourni qu'en mode "realtime". BUG RÉEL trouvé dans cette session :
+    la session de l'API Live est ouverte une seule fois au démarrage du pipeline, alors que notre
+    service attend indéfiniment entre deux appels. Or ces sessions expirent au bout de quelques
+    minutes. Un appel arrivant 47 minutes après le démarrage trouvait donc une session morte —
+    l'accueil était déclenché, l'instruction système composée, puis plus rien : aucun audio et
+    AUCUNE erreur, Pipecat ne détectant pas l'expiration. C'est une incompatibilité de conception
+    (l'API Live suppose une session par conversation, pas une connexion permanente réutilisée),
+    d'où une reconnexion explicite à chaque début d'appel.
+    """
+    # PipelineParams.audio_in_sample_rate vaut 16000 par défaut, indépendamment de
+    # audio_in_sample_rate=8000 réglé sur le transport — bug réel trouvé pendant cette session :
+    # la VAD utilisait silencieusement 16000 Hz sur de l'audio réellement à 8000 Hz (aucune
+    # erreur, 16000 étant un taux supporté par Silero, juste un mauvais découpage des
+    # échantillons), ce qui empêchait toute détection de parole. Doit rester aligné sur
+    # SAMPLE_RATE partout dans ce fichier.
+    # idle_timeout_secs=None : `PipelineTask` (alias de `pipecat.pipeline.worker.PipelineWorker`)
+    # annule tout le pipeline après 5 minutes d'inactivité par défaut (IDLE_TIMEOUT_SECS=300) —
+    # bug réel trouvé pendant cette session : le conteneur s'arrêtait tout seul en attendant un
+    # appel, avant même qu'un client ne se connecte. Notre service DOIT pouvoir attendre
+    # indéfiniment entre deux appels, donc ce minuteur est désactivé.
+    task = PipelineTask(
+        pipeline,
+        params=PipelineParams(
+            allow_interruptions=True,
+            audio_in_sample_rate=SAMPLE_RATE,
+            audio_out_sample_rate=SAMPLE_RATE,
+        ),
+        idle_timeout_secs=None,
+    )
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(_transport, _client):
+        # Le message d'accueil est déclenché ici, mais son contenu vient du system_instruction
+        # (voir prompt.py) : le modèle se présente de lui-même dès ce premier LLMRunFrame, sans
+        # message utilisateur préalable.
+        logger.info("FreeSWITCH connecté — appel en cours, déclenchement du message d'accueil.")
+        if realtime_service is not None:
+            # `_reconnect` est privé, mais c'est le seul point d'entrée exposé pour repartir
+            # d'une session neuve ; il enchaîne _disconnect puis _connect en réutilisant le
+            # jeton de reprise de session.
+            logger.info("Mode temps réel : réouverture d'une session Live pour cet appel.")
+            await realtime_service._reconnect()
+        await task.queue_frames([LLMRunFrame()])
+        if realtime_service is not None:
+            await asyncio.sleep(2)
+            logger.info(
+                "[diag] pret_pour_audio=%s contexte=%s jeton_reprise=%s session=%s",
+                realtime_service._ready_for_realtime_input,
+                realtime_service._context is not None,
+                realtime_service._session_resumption_handle is not None,
+                realtime_service._session is not None,
+            )
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(_transport, _client):
+        # Bug réel trouvé pendant cette session : appeler task.cancel() ici annule tout le
+        # pipeline, ce qui termine runner.run(task) et donc le process — le conteneur s'arrêtait
+        # après CHAQUE appel. Or SingleClientWebsocketServerTransport est conçu pour accepter des
+        # appels successifs (confirmé en lisant _client_handler du transport installé : il boucle
+        # indéfiniment, acceptant un nouveau client après chaque déconnexion). Il suffit donc de
+        # réinitialiser la conversation pour le prochain appel, sans toucher au pipeline.
+        logger.info("FreeSWITCH déconnecté — fin d'appel, réinitialisation pour le prochain.")
+        context.set_messages([])
+
+    runner = PipelineRunner()
+    await runner.run(task)
 
 
 async def build_tts():
@@ -220,6 +301,34 @@ async def main() -> None:
     vad_params = VADParams(min_volume=0.1)
     vad = VADProcessor(vad_analyzer=SileroVADAnalyzer(params=vad_params))
 
+    context = LLMContext()
+
+    if PIPELINE_MODE == "realtime":
+        # Mode "speech-to-speech" : l'audio entre et ressort sans jamais passer par du texte.
+        # Ni STT, ni TTS, ni analyseur de fin de tour local — le modèle entend l'intonation et
+        # décide lui-même quand l'appelant a fini de parler, ce qui supprime les temporisations
+        # de sécurité qui pesaient les deux tiers de la latence en mode chaîné.
+        #
+        # Débits : contrairement à GeminiTTSService (cf. build_tts), ce service est honnête sur
+        # les siens — il déclare le débit réel de chaque bloc entrant dans le mime-type et
+        # étiquette sa sortie à 24 kHz. Le transport se charge des conversions vers le 8 kHz de
+        # FreeSWITCH, rien à corriger à la main.
+        realtime_llm = GeminiLiveLLMService(
+            api_key=await fetch_llm_api_key("gemini"),
+            system_instruction=SYSTEM_PROMPT,
+        )
+        user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
+        pipeline = Pipeline(
+            [
+                transport.input(),
+                user_aggregator,
+                realtime_llm,
+                transport.output(),
+                assistant_aggregator,
+            ]
+        )
+        return await run_pipeline(transport, pipeline, context, realtime_service=realtime_llm)
+
     # device/compute_type sont des paramètres directs du constructeur, pas des champs de
     # Settings (vérifié par introspection sur pipecat-ai 1.8.1). Sans compute_type explicite,
     # ctranslate2 convertit les poids float16 du modèle en float32 sur CPU — deux fois plus
@@ -271,49 +380,7 @@ async def main() -> None:
         ]
     )
 
-    # PipelineParams.audio_in_sample_rate vaut 16000 par défaut, indépendamment de
-    # audio_in_sample_rate=8000 réglé sur le transport — bug réel trouvé pendant cette
-    # session : la VAD utilisait silencieusement 16000 Hz sur de l'audio réellement à 8000 Hz
-    # (aucune erreur, 16000 étant un taux supporté par Silero, juste un mauvais découpage des
-    # échantillons), ce qui empêchait toute détection de parole. Doit rester aligné sur
-    # SAMPLE_RATE partout dans ce fichier.
-    # idle_timeout_secs=None : `PipelineTask` (alias de `pipecat.pipeline.worker.PipelineWorker`)
-    # annule tout le pipeline après 5 minutes d'inactivité par défaut (IDLE_TIMEOUT_SECS=300) —
-    # bug réel trouvé pendant cette session : le conteneur s'arrêtait tout seul en attendant un
-    # appel, avant même qu'un client ne se connecte. Notre service DOIT pouvoir attendre
-    # indéfiniment entre deux appels, donc ce minuteur est désactivé.
-    task = PipelineTask(
-        pipeline,
-        params=PipelineParams(
-            allow_interruptions=True,
-            audio_in_sample_rate=SAMPLE_RATE,
-            audio_out_sample_rate=SAMPLE_RATE,
-        ),
-        idle_timeout_secs=None,
-    )
-
-    @transport.event_handler("on_client_connected")
-    async def on_client_connected(_transport, _client):
-        # Le message d'accueil est déclenché ici, mais son contenu vient du system_instruction
-        # (voir prompt.py) : Claude se présente de lui-même dès ce premier LLMRunFrame, sans
-        # message utilisateur préalable.
-        logger.info("FreeSWITCH connecté — appel en cours, déclenchement du message d'accueil.")
-        await task.queue_frames([LLMRunFrame()])
-
-    @transport.event_handler("on_client_disconnected")
-    async def on_client_disconnected(_transport, _client):
-        # Bug réel trouvé pendant cette session : appeler task.cancel() ici annule tout le
-        # pipeline, ce qui termine runner.run(task) et donc le process — le conteneur
-        # s'arrêtait après CHAQUE appel. Or SingleClientWebsocketServerTransport est conçu pour
-        # accepter des appels successifs (confirmé en lisant _client_handler du transport
-        # installé : il boucle indéfiniment, acceptant un nouveau client après chaque
-        # déconnexion). Il suffit donc de réinitialiser la conversation pour le prochain appel,
-        # sans toucher au pipeline lui-même.
-        logger.info("FreeSWITCH déconnecté — fin d'appel, réinitialisation pour le prochain.")
-        context.set_messages([])
-
-    runner = PipelineRunner()
-    await runner.run(task)
+    return await run_pipeline(transport, pipeline, context)
 
 
 if __name__ == "__main__":

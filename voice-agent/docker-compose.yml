@@ -7,6 +7,8 @@ services:
       # depuis un conteneur, on l'atteint via host.docker.internal.
       VAULT_ADDR: http://host.docker.internal:8300
       VAULT_TOKEN: ${VAULT_TOKEN}
+      # PIPELINE_MODE=cascade (STT-LLM-TTS, modulaire) ou realtime (speech-to-speech, fluide).
+      PIPELINE_MODE: ${PIPELINE_MODE:-cascade}
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
