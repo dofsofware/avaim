@@ -7,6 +7,10 @@ services:
       # depuis un conteneur, on l'atteint via host.docker.internal.
       VAULT_ADDR: http://host.docker.internal:8300
       VAULT_TOKEN: ${VAULT_TOKEN}
+      # Langues declarees de l agent (codes ISO) et langue par defaut :
+      # fr=francais, en=anglais, wo=wolof, ff=pular.
+      AGENT_LANGUAGES: ${AGENT_LANGUAGES:-fr,en,wo,ff}
+      AGENT_DEFAULT_LANGUAGE: ${AGENT_DEFAULT_LANGUAGE:-fr}
       # PIPELINE_MODE=cascade (STT-LLM-TTS, modulaire) ou realtime (speech-to-speech, fluide).
       PIPELINE_MODE: ${PIPELINE_MODE:-cascade}
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}

@@ -63,6 +63,14 @@ WS_PORT = int(os.environ.get("PIPECAT_WS_PORT", "8765"))
 #    fin de tour est jugée à l'intonation plutôt qu'au silence — mais fusionne STT, LLM et TTS
 #    chez un seul fournisseur, ce qui contredit le principe de passerelles interchangeables.
 #    D'où un MODE et non un remplacement : à choisir par agent selon ce qui prime.
+# Langues déclarées de l'agent et langue par défaut (§11 : liste pilotée par la donnée, jamais
+# codée en dur ; toute langue non reconnue retombe sur la langue par défaut, §67). Codes ISO tels
+# qu'attendus par `pipecat.transcriptions.language.Language` : fr, en, wo (wolof), ff (pular).
+AGENT_LANGUAGES = [
+    Language(code.strip()) for code in os.environ.get("AGENT_LANGUAGES", "fr,en,wo,ff").split(",")
+]
+AGENT_DEFAULT_LANGUAGE = Language(os.environ.get("AGENT_DEFAULT_LANGUAGE", "fr"))
+
 PIPELINE_MODE = os.environ.get("PIPELINE_MODE", "cascade")
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
 # STT_PROVIDER=gemini|whisper. Le cahier des charges (§ STT/TTS Gateways) impose un STT
@@ -213,10 +221,18 @@ async def build_tts():
         # 24000Hz sample rate") mais ne corrige rien. Une fois le débit réel annoncé, c'est le
         # transport de sortie qui rééchantillonne vers les 8 kHz de FreeSWITCH
         # (base_output.py:604).
+        # `language` n'est qu'un indice, pas une contrainte : vérifié en synthétisant une phrase
+        # anglaise avec language_code=fr-FR, puis en la faisant retranscrire — elle ressort en
+        # anglais correct. Le modèle suit la langue du TEXTE. Inutile donc de piloter ce
+        # paramètre dynamiquement au fil des changements de langue de l'appelant ; on le laisse
+        # sur le français, langue d'accueil.
         return GeminiTTSService(
             api_key=await fetch_llm_api_key("gemini"),
             sample_rate=GeminiTTSService.GOOGLE_SAMPLE_RATE,
-            params=GeminiTTSService.InputParams(language=Language.FR),
+            # La langue déclarée ici n'est qu'un défaut : mesuré dans cette session, le service
+            # prononce correctement du wolof alors qu'il était réglé sur le français — c'est la
+            # langue du TEXTE reçu qui commande, pas ce paramètre.
+            params=GeminiTTSService.InputParams(language=AGENT_DEFAULT_LANGUAGE),
         )
     if TTS_PROVIDER == "piper":
         return PiperTTSService(settings=PiperTTSSettings(voice=PIPER_VOICE, language="fr"))
@@ -230,16 +246,19 @@ async def build_stt():
         # version rééchantillonnée à 16 kHz, donc rien à convertir ici.
         return GeminiSTTService(
             api_key=await fetch_llm_api_key("gemini"),
-            # `languages` sert d'indice (pas de contrainte) sur les langues attendues — cf. §11
-            # du cahier des charges. Le service refuse de combiner ces indices avec
-            # `language_auto` ("mutually exclusive", les indices l'emportent) : on s'en tient
-            # donc aux indices, qui conviennent mieux à un agent dont les langues sont déclarées.
-            # Validé sur un vrai appel : Gemini a transcrit "Ninga def? Man dégguma wolof tubab
-            # dé. Est-ce que meun nga ma comprendre ?" en identifiant le wolof, y compris
-            # l'alternance codique wolof/français au sein d'une même phrase (§12). Épinglé sur
-            # `language=Language.FR` seul, il forçait au contraire le wolof dans le moule
-            # français — constaté à l'usage, "élections Sénégal" pour une phrase en wolof.
-            settings=GeminiSTTService.Settings(languages=[Language.FR, Language.WO]),
+            # Indices de langue plutôt que `language_auto` : l'agent déclare un jeu de langues
+            # fermé (AGENT_LANGUAGES), et les indices guident le modèle en réduisant les
+            # confusions entre langues proches. Les deux réglages sont mutuellement exclusifs —
+            # le service refuse de les combiner et les indices l'emportent. Repasser à
+            # `language_auto=True` (sans aucun indice) pour un agent ouvert à toutes les langues
+            # que Gemini connaît, au prix d'une détection moins guidée.
+            #
+            # L'historique de ce réglage vaut d'être connu : épinglé sur `language=Language.FR`,
+            # le service forçait le wolof dans le moule français ("élections Sénégal" pour une
+            # phrase en wolof). Avec les indices [FR, WO], il a correctement transcrit
+            # "Ninga def? Man dégguma wolof tubab dé. Est-ce que meun nga ma comprendre ?",
+            # alternance codique comprise (§12).
+            settings=GeminiSTTService.Settings(languages=AGENT_LANGUAGES),
         )
     if STT_PROVIDER == "whisper":
         return TelephonyWhisperSTTService(
