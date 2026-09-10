@@ -49,7 +49,7 @@ from pipecat.transports.websocket.server import (
     SingleClientWebsocketServerTransport,
 )
 
-from prompt import SYSTEM_PROMPT
+from prompt import build_system_prompt
 from transports.freeswitch_audio_stream import SAMPLE_RATE, FreeswitchAudioStreamSerializer
 from vault_client import fetch_llm_api_key
 
@@ -70,6 +70,16 @@ AGENT_LANGUAGES = [
     Language(code.strip()) for code in os.environ.get("AGENT_LANGUAGES", "fr,en,wo,ff").split(",")
 ]
 AGENT_DEFAULT_LANGUAGE = Language(os.environ.get("AGENT_DEFAULT_LANGUAGE", "fr"))
+# Nom sous lequel l'agent se présente. Paramétrable dès maintenant car chaque agent de la
+# plateforme aura le sien ; la version plateforme le lira dans la table `agent` plutôt que dans
+# l'environnement.
+AGENT_NAME = os.environ.get("AGENT_NAME", "Arame")
+
+SYSTEM_PROMPT = build_system_prompt(
+    nom=AGENT_NAME,
+    langues=[code.strip() for code in os.environ.get("AGENT_LANGUAGES", "fr,en,wo,ff").split(",")],
+    defaut=str(AGENT_DEFAULT_LANGUAGE),
+)
 
 PIPELINE_MODE = os.environ.get("PIPELINE_MODE", "cascade")
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")

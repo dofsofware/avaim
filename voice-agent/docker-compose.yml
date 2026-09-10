@@ -11,6 +11,8 @@ services:
       # fr=francais, en=anglais, wo=wolof, ff=pular.
       AGENT_LANGUAGES: ${AGENT_LANGUAGES:-fr,en,wo,ff}
       AGENT_DEFAULT_LANGUAGE: ${AGENT_DEFAULT_LANGUAGE:-fr}
+      # Nom sous lequel l agent se presente.
+      AGENT_NAME: ${AGENT_NAME:-Arame}
       # PIPELINE_MODE=cascade (STT-LLM-TTS, modulaire) ou realtime (speech-to-speech, fluide).
       PIPELINE_MODE: ${PIPELINE_MODE:-cascade}
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
